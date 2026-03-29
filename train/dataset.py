@@ -2,8 +2,8 @@ import os
 import torch
 import torch_cluster
 from torch_geometric.data import Data, Dataset
-
-# РОЗКОМЕНТУЙ, ЯКЩО ВСТАНОВИВ PHYSICS NEMO
+import scipy.sparse as sp
+import numpy as np
 from physicsnemo.nn.functional import radius_search as nvidia_radius_search
 
 class IPCDataset(Dataset):
@@ -15,7 +15,7 @@ class IPCDataset(Dataset):
         
         self.stats = torch.load(os.path.join(self.data_dir, "global_stats.pt"))
         
-        self.contact_radius = self.stats['avg_edge_len'].item() * 1.5
+        self.contact_radius = self.stats['avg_edge_len'].item() * 4
         print(f"[{mode}] Dataset-driven Contact Radius: {self.contact_radius:.6f}")
         
         self.noise_std_vel = self.stats['vel_std'] * noise_scale
@@ -51,73 +51,59 @@ class IPCDataset(Dataset):
         node_type = static['node_type'].squeeze()
         materials = static['materials']
         
-        # ==========================================
-        # 1. ІН'ЄКЦІЯ ШУМУ (Лише для train і лише для динаміки)
-        # ==========================================
         if self.mode == 'train':
             is_dynamic = (node_type == 0).unsqueeze(-1)
-            
-            # Швидкісний шум беремо напряму з нашого датасет-вектора
             noise_v = torch.randn_like(vel) * self.noise_std_vel * is_dynamic
-            
-            # Позиційний шум вираховуємо динамічно через поточний dt
             noise_p = noise_v * dt 
             
             pos_noisy = pos + noise_p
             vel_noisy = vel + noise_v
             
-            # Коригуємо таргет
             target_accel = accel - (noise_v / dt)
         else:
             pos_noisy = pos
             vel_noisy = vel
-            target_accel = accel # Наш Ground Truth таргет
+            target_accel = accel
 
-        # ==========================================
-        # 2. РОЗРАХУНОК LOOKAHEAD ТА RADIUS SEARCH
-        # ==========================================
         pos_lookahead = pos_noisy + vel_noisy * dt
         
-        # --- БЕКЕНД ПОШУКУ (NVIDIA PhysicsNeMo або PyG) ---
-        # Якщо ти імпортував nvidia_radius_search, використовуй його:
-        # Використовуємо NVIDIA PhysicsNeMo:
-        edge_index_dynamic = nvidia_radius_search(
+        MAX_DYNAMIC_POINTS = 32
+        neighbors = nvidia_radius_search(
             pos_lookahead, 
             pos_lookahead, 
-            radius=self.contact_radius
+            radius=self.contact_radius,
+            max_points=MAX_DYNAMIC_POINTS
         )
+
+        num_nodes = pos_lookahead.size(0)
+        row = torch.arange(num_nodes, device=pos_lookahead.device).view(-1, 1).repeat(1, MAX_DYNAMIC_POINTS).view(-1)
+        col = neighbors.view(-1)
+
+        mask = col >= 0
+        edge_index_dynamic = torch.stack([row[mask], col[mask]], dim=0).long()
         
-        # Якщо вони раптом повертають кортеж
-        if isinstance(edge_index_dynamic, tuple):
-            edge_index_dynamic = torch.stack(edge_index_dynamic, dim=0)
-            
-        # Якщо вони повертають тензор у форматі [E, 2] замість нашого [2, E]
-        if isinstance(edge_index_dynamic, torch.Tensor) and edge_index_dynamic.shape[0] != 2:
-            edge_index_dynamic = edge_index_dynamic.t().contiguous()
+        src_dyn = edge_index_dynamic[0]
+        dst_dyn = edge_index_dynamic[1]
         
-        # Fallback (Torch Cluster - те, що NeMo використовує під капотом):
-        #edge_index_dynamic = torch_cluster.radius_graph(
-         #   pos_lookahead, 
-          #  r=self.contact_radius, 
-           # max_num_neighbors=20, 
-            #loop=False
-        #)
+        row_stat = edge_index_static[0].cpu().numpy()
+        col_stat = edge_index_static[1].cpu().numpy()
+        adj = sp.coo_matrix((np.ones_like(row_stat), (row_stat, col_stat)), shape=(num_nodes, num_nodes))
+        _, comp_labels = sp.csgraph.connected_components(adj, directed=False)
+        comp_labels = torch.from_numpy(comp_labels).to(edge_index_dynamic.device)
+
+        cross_mask = comp_labels[src_dyn] != comp_labels[dst_dyn]
         
-        # ==========================================
-        # 3. ФІЛЬТРАЦІЯ (Topological Mask)
-        # ==========================================
-        MAX_NODES = pos_noisy.shape[0]
-        static_hashed = edge_index_static[0] * MAX_NODES + edge_index_static[1]
-        dynamic_hashed = edge_index_dynamic[0] * MAX_NODES + edge_index_dynamic[1]
+        d_ij_dyn = pos_lookahead[src_dyn] - pos_lookahead[dst_dyn]
+        dist_dyn = torch.norm(d_ij_dyn, dim=1)
+        dist_mask = dist_dyn <= self.contact_radius
         
-        mask = ~torch.isin(dynamic_hashed, static_hashed)
-        edge_index_dynamic = edge_index_dynamic[:, mask]
+        loop_mask = src_dyn != dst_dyn
         
+        final_mask = cross_mask & dist_mask & loop_mask
+        edge_index_dynamic = edge_index_dynamic[:, final_mask]
+
         full_edge_index = torch.cat([edge_index_static, edge_index_dynamic], dim=1)
-        
-        # ==========================================
-        # 4. ФІЧІ РЕБЕР
-        # ==========================================
+
         src, dst = full_edge_index
         d_ij_current = pos_noisy[src] - pos_noisy[dst]
         d_ij_lookahead = pos_lookahead[src] - pos_lookahead[dst]
@@ -134,14 +120,9 @@ class IPCDataset(Dataset):
 
         edge_attr = torch.cat([d_ij_current, d_ij_curr_norm, d_ij_look_norm, edge_type], dim=1)
         
-        # ==========================================
-        # 5. НОРМАЛІЗАЦІЯ І ЗБІРКА DATA
-        # ==========================================
         vel_norm = (vel_noisy - self.stats['vel_mean']) / self.stats['vel_std']
         accel_norm = (target_accel - self.stats['accel_mean']) / self.stats['accel_std']
         
-        # Нормалізація відносних векторів d_ij_current (за бажанням можна додати в stats)
-        # Для стабільності їх часто просто ділять на радіус контакту
         edge_attr[:, :3] = edge_attr[:, :3] / self.contact_radius
         edge_attr[:, 3:5] = edge_attr[:, 3:5] / self.contact_radius
         

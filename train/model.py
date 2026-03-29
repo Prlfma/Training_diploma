@@ -45,7 +45,7 @@ class CauchyLayer(nn.Module):
 
 class CauchyMLP(nn.Module):
     """Повний аналог стандартного MLP на базі Cauchy XNet."""
-    def __init__(self, in_dim, hidden_dim, out_dim, layers=1):
+    def __init__(self, in_dim, hidden_dim, out_dim, layers=2):
         super().__init__()
         modules = []
         current_dim = in_dim

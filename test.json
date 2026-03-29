@@ -1,0 +1,9 @@
+{
+    "experiment_name": "run_standard_final",
+    "dataset_path": "/home/prifma/IPC/ORIGINAL?/IPC/dataset_processed_final/",
+    "weights_path": "/mnt/data/DIPLOMA/code/checkpoints/run_standart_15/run_standard_15/best_model.pt",
+    "num_frames": 100,
+    "playback_fps": 30,
+    "model_layers": 15,
+    "hidden_dim": 128
+}
