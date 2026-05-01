@@ -121,7 +121,14 @@ class IPCDataset(Dataset):
         edge_attr = torch.cat([d_ij_current, d_ij_curr_norm, d_ij_look_norm, edge_type], dim=1)
         
         vel_norm = (vel_noisy - self.stats['vel_mean']) / self.stats['vel_std']
-        accel_norm = (target_accel - self.stats['accel_mean']) / self.stats['accel_std']
+        n_steps = 5
+        target_accels = []
+        for step in range(n_steps):
+            step_idx = min(t + step, traj['accel'].shape[0] - 1)
+            target_accels.append(traj['accel'][step_idx])
+            
+        target_accels = torch.stack(target_accels, dim=1) 
+        accel_norm = (target_accels - self.stats['accel_mean']) / self.stats['accel_std']
         
         edge_attr[:, :3] = edge_attr[:, :3] / self.contact_radius
         edge_attr[:, 3:5] = edge_attr[:, 3:5] / self.contact_radius
@@ -135,7 +142,8 @@ class IPCDataset(Dataset):
             y=accel_norm,           
             pos=pos_noisy,          
             node_type=node_type,    
-            dt=torch.tensor([dt], dtype=torch.float)
+            dt=torch.tensor([dt], dtype=torch.float),
+            contact_radius=torch.tensor([self.contact_radius], dtype=torch.float)
         )
         
         return data

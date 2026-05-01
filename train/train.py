@@ -91,7 +91,90 @@ def run_epoch(model, loader, optimizer, device, stats, is_train=True):
             
     return total_loss / len(loader), total_mse / len(loader), total_barrier / len(loader)
     
-
+def run_epoch_multistep(model, loader, optimizer, device, stats, is_train=True, n_steps=5):
+    model.train() if is_train else model.eval()
+    total_loss, total_mse, total_barrier = 0.0, 0.0, 0.0
+    
+    with torch.set_grad_enabled(is_train):
+        desc = "Train (5-Step)" if is_train else "Test (5-Step)"
+        pbar = tqdm(loader, desc=f"[{desc}]")
+        
+        for batch in pbar:
+            batch = batch.to(device)
+            if is_train: optimizer.zero_grad()
+            
+            loss_mse = 0.0
+            loss_barrier = 0.0
+            
+            current_x = batch.x
+            current_pos = batch.pos
+            current_edge_attr = batch.edge_attr
+            
+            current_v_phys = batch.x[:, :3] * stats['vel_std'].to(device) + stats['vel_mean'].to(device)
+            dt = batch.dt[0].item()
+            cr = batch.contact_radius[0].item() # Contact radius
+            dynamic_mask = (batch.node_type.squeeze() == 0)
+            
+            for step in range(n_steps):
+                step_data = batch.clone()
+                step_data.x = current_x
+                step_data.pos = current_pos
+                step_data.edge_attr = current_edge_attr
+                
+                pred_accel_norm = model(step_data)
+                
+                pred_accel_dyn = pred_accel_norm[dynamic_mask]
+                target_accel_dyn = batch.y[dynamic_mask, step, :] # [N_dyn, 3]
+                
+                step_loss_mse = F.mse_loss(pred_accel_dyn, target_accel_dyn)
+                loss_mse += step_loss_mse
+                
+                pred_accel_phys = pred_accel_norm * stats['accel_std'].to(device) + stats['accel_mean'].to(device)
+                
+                accel_phys_dyn = pred_accel_phys * dynamic_mask.unsqueeze(-1)
+                current_v_phys = current_v_phys + accel_phys_dyn * dt
+                current_pos = current_pos + current_v_phys * dt
+                
+                is_dynamic_edge = current_edge_attr[:, 4] == 1.0
+                dyn_edges = batch.edge_index[:, is_dynamic_edge]
+                if dyn_edges.shape[1] > 0:
+                    src, dst = dyn_edges
+                    d_ij = current_pos[src] - current_pos[dst]
+                    dist_future = torch.norm(d_ij, dim=1)
+                    penetration = F.relu(BARRIER_MARGIN - dist_future)
+                    loss_barrier += penetration.mean() * BARRIER_WEIGHT
+                
+                if step < n_steps - 1:
+                    new_vel_norm = (current_v_phys - stats['vel_mean'].to(device)) / stats['vel_std'].to(device)
+                    current_x = torch.cat([new_vel_norm, current_x[:, 3:]], dim=1)
+                    
+                    src, dst = batch.edge_index
+                    d_ij_curr = current_pos[src] - current_pos[dst]
+                    pos_lookahead = current_pos + current_v_phys * dt
+                    d_ij_look = pos_lookahead[src] - pos_lookahead[dst]
+                    
+                    current_edge_attr = torch.cat([
+                        d_ij_curr / cr,                                          
+                        (torch.norm(d_ij_curr, dim=1, keepdim=True) / cr),       
+                        (torch.norm(d_ij_look, dim=1, keepdim=True) / cr),          
+                        current_edge_attr[:, 5:7]                                
+                    ], dim=1)
+                    
+            loss_mse = loss_mse / n_steps
+            loss_barrier = loss_barrier / n_steps
+            loss = loss_mse + loss_barrier
+            
+            if is_train:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                
+            total_loss += loss.item()
+            total_mse += loss_mse.item()        
+            total_barrier += loss_barrier.item()
+            pbar.set_postfix({'MSE(5s)': f"{loss_mse.item():.4f}", 'Bar': f"{loss_barrier.item():.4f}"})
+            
+    return total_loss / len(loader), total_mse / len(loader), total_barrier / len(loader)
 def train(args):
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -126,8 +209,8 @@ def train(args):
         for epoch in range(EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{EPOCHS} ---")
             
-            train_loss, train_mse, train_bar = run_epoch(model, train_loader, optimizer, device, stats, is_train=True)
-            test_loss, test_mse, test_bar = run_epoch(model, test_loader, optimizer, device, stats, is_train=False)
+            train_loss, train_mse, train_bar = run_epoch_multistep(model, train_loader, optimizer, device, stats, is_train=True)
+            test_loss, test_mse, test_bar = run_epoch_multistep(model, test_loader, optimizer, device, stats, is_train=False)
             
             history['train_mse'].append(train_mse)
             history['test_mse'].append(test_mse)
