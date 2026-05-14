@@ -2,3 +2,13 @@ venv
 checkpoints
 __pycache__
 *.ini
+*.pt
+IPC_bin
+build
+.venv
+*dataset*
+*.msh
+*.obj
+config.txt
+export_obj
+cube_viewer.json

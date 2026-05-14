@@ -171,8 +171,9 @@ def run_epoch_multistep(model, loader, optimizer, device, stats, is_train=True, 
                 
             total_loss += loss.item()
             total_mse += loss_mse.item()        
-            total_barrier += loss_barrier.item()
-            pbar.set_postfix({'MSE(5s)': f"{loss_mse.item():.4f}", 'Bar': f"{loss_barrier.item():.4f}"})
+            barrier_val = loss_barrier.item() if torch.is_tensor(loss_barrier) else loss_barrier
+            total_barrier += barrier_val
+            pbar.set_postfix({'MSE(5s)': f"{loss_mse.item():.4f}", 'Bar': f"{barrier_val:.4f}"})
             
     return total_loss / len(loader), total_mse / len(loader), total_barrier / len(loader)
 def train(args):
@@ -181,11 +182,11 @@ def train(args):
         print(f"🚀 Запуск експерименту '{args.exp_name}' на: {device}")
         send_tg_message(args.tg_token, args.tg_chat, f"🚀 *Старт тренування: {args.exp_name}*\nАрхітектура: {args.arch}\nDevice: {device}")
 
-        train_dataset = IPCDataset(processed_dir=PROCESSED_DIR, mode='train', noise_scale=0.0)
-        test_dataset = IPCDataset(processed_dir=PROCESSED_DIR, mode='test',noise_scale=0.0)
+        train_dataset = IPCDataset(processed_dir=args.dataset, mode='train', noise_scale=0.0, overfit=args.overfit)
+        test_dataset = IPCDataset(processed_dir=args.dataset, mode='test', noise_scale=0.0, overfit=args.overfit)
         
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
         
         if args.arch == 'standard':
             model = CustomMeshGraphNet(node_in_dim=7, edge_in_dim=7, output_dim=3, hidden_dim=128, num_processor_layers=15, mlp_class=MLP)
@@ -209,8 +210,8 @@ def train(args):
         for epoch in range(EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{EPOCHS} ---")
             
-            train_loss, train_mse, train_bar = run_epoch_multistep(model, train_loader, optimizer, device, stats, is_train=True)
-            test_loss, test_mse, test_bar = run_epoch_multistep(model, test_loader, optimizer, device, stats, is_train=False)
+            train_loss, train_mse, train_bar = run_epoch_multistep(model, train_loader, optimizer, device, stats, is_train=True, n_steps=args.n_steps)
+            test_loss, test_mse, test_bar = run_epoch_multistep(model, test_loader, optimizer, device, stats, is_train=False, n_steps=args.n_steps)
             
             history['train_mse'].append(train_mse)
             history['test_mse'].append(test_mse)
@@ -270,6 +271,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Запуск тренування MeshGraphNet з Early Stopping та TG")
     parser.add_argument('--arch', type=str, required=True, choices=['standard', 'cauchy'])
     parser.add_argument('--exp_name', type=str, required=True)
+    parser.add_argument('--batch_size', type=int, default=BATCH_SIZE)
+    parser.add_argument('--n_steps', type=int, default=5)
+    parser.add_argument('--dataset', type=str, default=PROCESSED_DIR)
+    parser.add_argument('--overfit', action='store_true', help='Use all data for both train and test (overfit mode)')
     parser.add_argument('--patience', type=int, default=15)
     parser.add_argument('--tg_token', type=str, default="")
     parser.add_argument('--tg_chat', type=str, default="")

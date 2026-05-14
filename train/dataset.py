@@ -7,7 +7,7 @@ import numpy as np
 from physicsnemo.nn.functional import radius_search as nvidia_radius_search
 
 class IPCDataset(Dataset):
-    def __init__(self, processed_dir, mode='train', noise_scale=0.03):
+    def __init__(self, processed_dir, mode='train', noise_scale=0.03, overfit=False):
         super().__init__(None) 
         
         self.data_dir = processed_dir
@@ -15,7 +15,7 @@ class IPCDataset(Dataset):
         
         self.stats = torch.load(os.path.join(self.data_dir, "global_stats.pt"))
         
-        self.contact_radius = self.stats['avg_edge_len'].item() * 4
+        self.contact_radius = self.stats['avg_edge_len'].item() * 0.6
         print(f"[{mode}] Dataset-driven Contact Radius: {self.contact_radius:.6f}")
         
         self.noise_std_vel = self.stats['vel_std'] * noise_scale
@@ -23,8 +23,11 @@ class IPCDataset(Dataset):
         
         sim_folders = sorted([f.path for f in os.scandir(self.data_dir) if f.is_dir()])
         
-        split_idx = int(len(sim_folders) * 0.8)
-        self.sim_folders = sim_folders[:split_idx] if mode == 'train' else sim_folders[split_idx:]
+        if overfit:
+            self.sim_folders = sim_folders
+        else:
+            split_idx = int(len(sim_folders) * 0.8)
+            self.sim_folders = sim_folders[:split_idx] if mode == 'train' else sim_folders[split_idx:]
         
         self.index_map = []
         for sim_idx, folder in enumerate(self.sim_folders):

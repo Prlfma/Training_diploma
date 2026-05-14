@@ -16,7 +16,7 @@ class MLPredictor(BasePredictor):
         if os.path.exists(weights_path):
             self.model.load_state_dict(torch.load(weights_path, map_location=device))
         else:
-            raise FileNotFoundError(f"❌ КРИТИЧНА ПОМИЛКА: Файл ваг не знайдено за шляхом: '{weights_path}'! Перевір назву експерименту або директорію запуску.")
+            raise FileNotFoundError(f"Файл ваг не знайдено за шляхом: '{weights_path}'")
         self.model.eval()
 
     def predict(self, sim_data: BaseSimulationData, radius_mult: float) -> torch.Tensor:
